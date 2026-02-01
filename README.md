@@ -67,6 +67,5 @@ This tool is for personal use only. Please respect YouTube's Terms of Service an
 
 ---
 
-**Topics/Tags to add:**
 ```
 youtube, downloader, python, gui, tkinter, yt-dlp, video-downloader, youtube-dl
