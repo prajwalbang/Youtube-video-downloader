@@ -139,6 +139,9 @@ class YouTubeDownloader:
             # Parse formats
             formats = self.video_info.get('formats', [])
             
+            # Video-only formats get merged with audio when ffmpeg is available
+            ffmpeg_available = self.check_ffmpeg()
+
             # Filter and organize formats
             video_formats = []
             for f in formats:
@@ -146,8 +149,8 @@ class YouTubeDownloader:
                 if f.get('vcodec') != 'none' and f.get('height'):
                     resolution = f.get('height')
                     ext = f.get('ext', 'mp4')
-                    fps = f.get('fps', 30)
-                    filesize = f.get('filesize', 0)
+                    fps = f.get('fps') or 30
+                    filesize = f.get('filesize') or f.get('filesize_approx') or 0
                     has_audio = f.get('acodec') != 'none'
                     format_id = f.get('format_id')
                     
@@ -159,19 +162,26 @@ class YouTubeDownloader:
                     else:
                         size_str = "Size N/A"
                     
-                    audio_str = "with audio" if has_audio else "video only"
-                    
+                    if has_audio:
+                        audio_str = "with audio"
+                    elif ffmpeg_available:
+                        audio_str = "audio auto-merged"
+                    else:
+                        audio_str = "video only - no audio"
+
                     display_text = f"{resolution}p  {ext}  {fps}fps  {size_str}  ({audio_str})"
-                    
+
                     video_formats.append({
                         'display': display_text,
                         'format_id': format_id,
                         'resolution': resolution,
+                        'fps': fps,
+                        'bitrate': f.get('tbr') or 0,
                         'has_audio': has_audio
                     })
-            
-            # Sort by resolution (highest first)
-            video_formats.sort(key=lambda x: x['resolution'], reverse=True)
+
+            # Sort by resolution, then fps and bitrate, so the best version of each resolution is kept
+            video_formats.sort(key=lambda x: (x['resolution'], x['fps'], x['bitrate']), reverse=True)
             
             # Remove duplicates with same resolution and audio status
             seen = set()
@@ -234,7 +244,7 @@ class YouTubeDownloader:
             if not selected_format['has_audio']:
                 if ffmpeg_available:
                     # Merge with audio if ffmpeg is available
-                    format_string = f"{format_id}+bestaudio[ext=m4a]/best"
+                    format_string = f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio/best"
                     merge_output = 'mp4'
                 else:
                     # Download video-only without audio if ffmpeg not available
