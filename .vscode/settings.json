@@ -1,0 +1,11 @@
+{
+    // Run Python files with this project's virtual environment
+    "code-runner.executorMap": {
+        "python": "\"$workspaceRoot/.venv/bin/python\" -u"
+    },
+    "code-runner.runInTerminal": true,
+    "code-runner.saveFileBeforeRun": true,
+
+    // Used by the Python extension, if installed
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+}
