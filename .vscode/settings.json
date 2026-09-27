@@ -1,7 +1,7 @@
 {
     // Run Python files with this project's virtual environment
     "code-runner.executorMap": {
-        "python": "\"$workspaceRoot/.venv/bin/python\" -u"
+        "python": "\"$workspaceRoot/.venv/bin/python\" -u \"$fullFileName\""
     },
     "code-runner.runInTerminal": true,
     "code-runner.saveFileBeforeRun": true,
