@@ -6,28 +6,68 @@ A simple, user-friendly Python GUI application for downloading YouTube videos in
 
 ✅ **Resolution Selection** - View and choose from all available video qualities  
 ✅ **Quality Information** - See resolution, file size, FPS, and audio availability  
+✅ **Automatic Audio Merging** - HD formats are downloaded with their audio and joined into one MP4  
 ✅ **Easy-to-Use GUI** - Simple interface built with Tkinter  
 ✅ **FFmpeg Auto-Detection** - Works with or without FFmpeg installed  
 ✅ **Custom Download Location** - Save videos wherever you want  
 ✅ **Progress Tracking** - Visual feedback during downloads  
 
+## Requirements
+
+- **Python 3.10+** with tkinter (current yt-dlp no longer supports older Python)
+- **Deno** - JavaScript runtime yt-dlp needs to read YouTube's full list of formats
+- **FFmpeg** - recommended, for merging HD video with audio
+- **yt-dlp** - installed from `requirements.txt`
+
+> **macOS note:** the built-in `/usr/bin/python3` is Python 3.9 and is too old. Install a newer Python with Homebrew (see below).
+
 ## Installation
 
-1. Clone the repository:
+### 1. Install system dependencies
+
+**macOS** (Homebrew):
 ```bash
-git clone https://github.com/yourusername/youtube-downloader.git
-cd youtube-downloader
+brew install python@3.13 python-tk@3.13 ffmpeg deno
 ```
 
-2. Install dependencies:
+**Windows**:
+- Python 3.10+ from [python.org](https://www.python.org/downloads/) (includes tkinter)
+- FFmpeg from [ffmpeg.org](https://ffmpeg.org/download.html)
+- Deno: `winget install DenoLand.Deno`
+
+**Linux** (Debian/Ubuntu):
 ```bash
+sudo apt install python3 python3-venv python3-tk ffmpeg
+curl -fsSL https://deno.land/install.sh | sh
+```
+
+### 2. Clone the repository
+```bash
+git clone https://github.com/prajwalbang/Youtube-video-downloader.git
+cd Youtube-video-downloader
+```
+
+### 3. Create a virtual environment and install Python packages
+
+macOS / Linux:
+```bash
+python3.13 -m venv .venv        # or any Python 3.10+
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Windows:
+```bash
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ## Usage
 
-1. Run the application:
+1. Activate the virtual environment (once per terminal session) and run the app:
 ```bash
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
 python youtube_downloader.py
 ```
 
@@ -36,25 +76,18 @@ python youtube_downloader.py
 4. Select your preferred quality
 5. Click "Download Selected"
 
-## Requirements
+## How Audio Works
 
-- Python 3.7+
-- yt-dlp
-- tkinter (usually included with Python)
-- FFmpeg (optional, for merging high-quality video with audio)
+YouTube stores HD video (roughly above 360p) and audio as separate streams. The format list shows:
 
-### Installing FFmpeg (Optional)
+- **with audio** - video and sound in one file, no FFmpeg needed
+- **audio auto-merged** - video-only stream; the app also downloads the best audio and joins them into one MP4 with FFmpeg
+- **video only - no audio** - shown when FFmpeg isn't installed; the download will have no sound
 
-For the highest quality downloads:
-- **Windows**: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-- **Mac**: `brew install ffmpeg`
-- **Linux**: `sudo apt install ffmpeg`
+## Troubleshooting
 
-## Notes
-
-- Formats marked "with audio" work without FFmpeg
-- "Video only" formats require FFmpeg to merge with audio
-- Without FFmpeg, you can still download video-only files (no sound)
+- **Nothing happens / "yt-dlp not installed"** - the virtual environment isn't active, or you're running a different Python. Activate `.venv` first.
+- **Missing resolutions or "Sign in to confirm you're not a bot"** - update yt-dlp (`pip install -U "yt-dlp[default]"`) and make sure Deno is installed.
 
 ## License
 
@@ -63,9 +96,3 @@ MIT License
 ## Disclaimer
 
 This tool is for personal use only. Please respect YouTube's Terms of Service and copyright laws.
-```
-
----
-
-```
-youtube, downloader, python, gui, tkinter, yt-dlp, video-downloader, youtube-dl
