@@ -1,6 +1,9 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, font as tkfont
 import threading
+import subprocess
+import shutil
+import sys
 import os
 try:
     import yt_dlp
@@ -12,177 +15,250 @@ except ImportError:
 class YouTubeDownloader:
     def __init__(self, root):
         self.root = root
-        self.root.title("YouTube Video Downloader")
-        self.root.geometry("650x500")
-        self.root.resizable(False, False)
-        
+        self.root.title("YouTube Downloader")
+
         # Download directory and formats storage
         self.download_path = os.path.join(os.path.expanduser("~"), "Downloads")
         self.available_formats = []
         self.video_info = None
-        
-        # Title
-        title_label = tk.Label(root, text="YouTube Video Downloader", 
-                              font=("Arial", 16, "bold"))
-        title_label.pack(pady=15)
-        
-        # URL input frame
-        url_frame = tk.Frame(root)
-        url_frame.pack(pady=10, padx=20, fill="x")
-        
-        url_label = tk.Label(url_frame, text="YouTube URL:", font=("Arial", 10))
-        url_label.pack(anchor="w")
-        
-        url_entry_frame = tk.Frame(url_frame)
-        url_entry_frame.pack(fill="x", pady=5)
-        
-        self.url_entry = tk.Entry(url_entry_frame, font=("Arial", 10))
-        self.url_entry.pack(side="left", fill="x", expand=True)
-        
-        self.fetch_btn = tk.Button(url_entry_frame, text="Fetch Resolutions", 
-                                   command=self.fetch_formats,
-                                   font=("Arial", 9, "bold"),
-                                   bg="#2196F3", fg="white",
-                                   cursor="hand2")
-        self.fetch_btn.pack(side="left", padx=5)
-        
-        # Resolution selection frame
-        resolution_frame = tk.Frame(root)
-        resolution_frame.pack(pady=10, padx=20, fill="both", expand=True)
-        
-        resolution_label = tk.Label(resolution_frame, text="Available Resolutions:", 
-                                    font=("Arial", 10))
-        resolution_label.pack(anchor="w")
-        
-        # Listbox with scrollbar
-        listbox_frame = tk.Frame(resolution_frame)
-        listbox_frame.pack(fill="both", expand=True, pady=5)
-        
-        scrollbar = tk.Scrollbar(listbox_frame)
+        self.last_file = None
+        self.ffmpeg_available = shutil.which("ffmpeg") is not None
+
+        self.setup_style()
+        self.build_ui()
+
+        # Size the window from the content so nothing is cut off, whatever the font scaling
+        self.root.update_idletasks()
+        min_height = self.root.winfo_reqheight()
+        self.root.minsize(560, min_height)
+        self.root.geometry(f"700x{min_height + 120}")
+
+    def setup_style(self):
+        style = ttk.Style()
+
+        # Use the native macOS theme when available, with system colors that follow dark mode
+        if "aqua" in style.theme_names():
+            style.theme_use("aqua")
+            self.secondary_fg = "systemSecondaryLabelColor"
+            self.primary_fg = "systemLabelColor"
+        else:
+            style.theme_use("clam")
+            self.secondary_fg = "gray40"
+            self.primary_fg = "black"
+        self.error_fg = "#FF453A"
+
+        family = tkfont.nametofont("TkDefaultFont").actual("family")
+        self.fonts = {
+            "title": tkfont.Font(family=family, size=24, weight="bold"),
+            "subtitle": tkfont.Font(family=family, size=13),
+            "section": tkfont.Font(family=family, size=13, weight="bold"),
+            "body": tkfont.Font(family=family, size=13),
+            "small": tkfont.Font(family=family, size=12),
+        }
+
+        style.configure("Title.TLabel", font=self.fonts["title"])
+        style.configure("Subtitle.TLabel", font=self.fonts["subtitle"], foreground=self.secondary_fg)
+        style.configure("Section.TLabel", font=self.fonts["section"])
+        style.configure("Body.TLabel", font=self.fonts["body"])
+        style.configure("Secondary.TLabel", font=self.fonts["small"], foreground=self.secondary_fg)
+        style.configure("Treeview", rowheight=28, font=self.fonts["body"])
+        style.configure("Treeview.Heading", font=self.fonts["small"])
+
+    def build_ui(self):
+        container = ttk.Frame(self.root, padding=(28, 24, 28, 24))
+        container.pack(fill="both", expand=True)
+
+        # Header
+        ttk.Label(container, text="YouTube Downloader", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(container, text="Paste a link, pick a quality, and download.",
+                  style="Subtitle.TLabel").pack(anchor="w", pady=(2, 18))
+
+        # URL input
+        url_row = ttk.Frame(container)
+        url_row.pack(fill="x")
+
+        self.url_entry = ttk.Entry(url_row, font=self.fonts["body"])
+        self.url_entry.pack(side="left", fill="x", expand=True, ipady=3)
+        self.url_entry.bind("<Return>", lambda e: self.fetch_formats())
+        self.url_entry.focus_set()
+
+        self.fetch_btn = ttk.Button(url_row, text="Fetch", command=self.fetch_formats)
+        self.fetch_btn.pack(side="left", padx=(10, 0))
+
+        # Video details, filled in after fetching
+        self.video_label = ttk.Label(container, text="", style="Secondary.TLabel")
+        self.video_label.pack(anchor="w", pady=(8, 0))
+
+        # Formats table
+        ttk.Label(container, text="Quality", style="Section.TLabel").pack(anchor="w", pady=(14, 6))
+
+        # Packed last (see end of build_ui) so it only takes space left over by the other sections
+        table_frame = ttk.Frame(container)
+
+        columns = {
+            "resolution": ("Resolution", 110),
+            "fps": ("FPS", 60),
+            "format": ("Format", 80),
+            "size": ("Size", 100),
+            "audio": ("Audio", 180),
+        }
+        self.format_table = ttk.Treeview(table_frame, columns=list(columns),
+                                         show="headings", selectmode="browse", height=6)
+        for col, (heading, width) in columns.items():
+            self.format_table.heading(col, text=heading, anchor="w")
+            self.format_table.column(col, width=width, anchor="w", stretch=(col == "audio"))
+
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.format_table.yview)
+        self.format_table.configure(yscrollcommand=scrollbar.set)
+        self.format_table.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        
-        self.resolution_listbox = tk.Listbox(listbox_frame, font=("Courier", 9),
-                                            yscrollcommand=scrollbar.set,
-                                            height=8)
-        self.resolution_listbox.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.resolution_listbox.yview)
-        
-        # Download path frame
-        path_frame = tk.Frame(root)
-        path_frame.pack(pady=10, padx=20, fill="x")
-        
-        path_label = tk.Label(path_frame, text="Download Location:", font=("Arial", 10))
-        path_label.pack(anchor="w")
-        
-        path_entry_frame = tk.Frame(path_frame)
-        path_entry_frame.pack(fill="x", pady=5)
-        
-        self.path_entry = tk.Entry(path_entry_frame, font=("Arial", 9))
-        self.path_entry.insert(0, self.download_path)
-        self.path_entry.pack(side="left", fill="x", expand=True)
-        
-        browse_btn = tk.Button(path_entry_frame, text="Browse", 
-                              command=self.browse_folder, width=8)
-        browse_btn.pack(side="left", padx=5)
-        
-        # Download button
-        self.download_btn = tk.Button(root, text="Download Selected", 
-                                     command=self.start_download,
-                                     font=("Arial", 12, "bold"),
-                                     bg="#4CAF50", fg="white",
-                                     width=20, height=2,
-                                     cursor="hand2",
-                                     state="disabled")
-        self.download_btn.pack(pady=10)
-        
-        # Progress bar
-        self.progress = ttk.Progressbar(root, length=500, mode='indeterminate')
-        self.progress.pack(pady=5)
-        
-        # Status label
-        self.status_label = tk.Label(root, text="Enter a YouTube URL and click 'Fetch Resolutions'", 
-                                    font=("Arial", 9), fg="gray")
-        self.status_label.pack(pady=5)
-    
+
+        self.format_table.bind("<<TreeviewSelect>>", self.on_select)
+        self.format_table.bind("<Double-1>", lambda e: self.start_download())
+
+        # Save location
+        save_label = ttk.Label(container, text="Save to", style="Section.TLabel")
+        path_row = ttk.Frame(container)
+
+        self.path_label = ttk.Label(path_row, text=self.display_path(self.download_path),
+                                    style="Body.TLabel")
+        self.path_label.pack(side="left")
+
+        ttk.Button(path_row, text="Choose…", command=self.browse_folder).pack(side="right")
+
+        separator = ttk.Separator(container)
+
+        # Bottom bar: status and progress on the left, actions on the right
+        bottom = ttk.Frame(container)
+
+        self.download_btn = ttk.Button(bottom, text="Download", command=self.start_download,
+                                       default="active")
+        self.download_btn.state(["disabled"])
+        self.download_btn.pack(side="right")
+
+        reveal_text = "Show in Finder" if sys.platform == "darwin" else "Open Folder"
+        self.reveal_btn = ttk.Button(bottom, text=reveal_text, command=self.reveal_file)
+
+        status_col = ttk.Frame(bottom)
+        status_col.pack(side="left", fill="x", expand=True, padx=(0, 20))
+
+        self.status_label = ttk.Label(status_col, text="Enter a YouTube URL to get started.",
+                                      style="Secondary.TLabel")
+        self.status_label.pack(anchor="w")
+
+        self.progress = ttk.Progressbar(status_col, mode="determinate", maximum=100)
+        self.progress.pack(fill="x", pady=(6, 0))
+
+        # Pack the lower sections from the bottom up, then let the table fill what's left,
+        # so the table is what shrinks when the window is small
+        bottom.pack(side="bottom", fill="x")
+        separator.pack(side="bottom", fill="x", pady=18)
+        path_row.pack(side="bottom", fill="x")
+        save_label.pack(side="bottom", anchor="w", pady=(18, 6))
+        table_frame.pack(fill="both", expand=True)
+
+    # ---------- helpers ----------
+
+    def display_path(self, path):
+        home = os.path.expanduser("~")
+        return "~" + path[len(home):] if path.startswith(home) else path
+
+    def set_status(self, text, error=False):
+        self.status_label.config(text=text, foreground=self.error_fg if error else self.secondary_fg)
+
+    def set_busy(self, busy):
+        state = ["disabled"] if busy else ["!disabled"]
+        self.fetch_btn.state(state)
+        if busy or self.format_table.selection():
+            self.download_btn.state(state)
+
+    def on_ui(self, func, *args):
+        """Run func on the Tk main thread (safe to call from worker threads)."""
+        self.root.after(0, func, *args)
+
     def browse_folder(self):
-        folder = filedialog.askdirectory()
+        folder = filedialog.askdirectory(initialdir=self.download_path)
         if folder:
-            self.path_entry.delete(0, tk.END)
-            self.path_entry.insert(0, folder)
             self.download_path = folder
-    
+            self.path_label.config(text=self.display_path(folder))
+
+    def on_select(self, event=None):
+        if self.format_table.selection() and not self.fetch_btn.instate(["disabled"]):
+            self.download_btn.state(["!disabled"])
+
+    def reveal_file(self):
+        if not self.last_file:
+            return
+        if sys.platform == "darwin":
+            subprocess.run(["open", "-R", self.last_file])
+        elif os.name == "nt":
+            subprocess.run(["explorer", "/select,", self.last_file])
+        else:
+            subprocess.run(["xdg-open", os.path.dirname(self.last_file)])
+
+    # ---------- fetching formats ----------
+
     def fetch_formats(self):
         url = self.url_entry.get().strip()
         if not url:
-            messagebox.showerror("Error", "Please enter a YouTube URL")
+            messagebox.showerror("No URL", "Please paste a YouTube URL first.")
             return
-        
-        # Start fetching in separate thread
-        thread = threading.Thread(target=self.get_video_formats, args=(url,))
-        thread.start()
-    
+
+        self.set_busy(True)
+        self.download_btn.state(["disabled"])
+        self.reveal_btn.pack_forget()
+        self.format_table.delete(*self.format_table.get_children())
+        self.video_label.config(text="")
+        self.progress.config(mode="indeterminate")
+        self.progress.start(12)
+        self.set_status("Fetching available formats…")
+
+        threading.Thread(target=self.get_video_formats, args=(url,), daemon=True).start()
+
     def get_video_formats(self, url):
         try:
-            self.fetch_btn.config(state="disabled")
-            self.progress.start()
-            self.status_label.config(text="Fetching available formats...", fg="blue")
-            self.resolution_listbox.delete(0, tk.END)
-            
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
             }
-            
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                self.video_info = ydl.extract_info(url, download=False)
-            
-            # Parse formats
-            formats = self.video_info.get('formats', [])
-            
-            # Video-only formats get merged with audio when ffmpeg is available
-            ffmpeg_available = self.check_ffmpeg()
+                info = ydl.extract_info(url, download=False)
 
             # Filter and organize formats
             video_formats = []
-            for f in formats:
+            for f in info.get('formats', []):
                 # Only include formats with video
                 if f.get('vcodec') != 'none' and f.get('height'):
-                    resolution = f.get('height')
-                    ext = f.get('ext', 'mp4')
                     fps = f.get('fps') or 30
                     filesize = f.get('filesize') or f.get('filesize_approx') or 0
                     has_audio = f.get('acodec') != 'none'
-                    format_id = f.get('format_id')
-                    
-                    # Format size display
-                    size_str = ""
-                    if filesize:
-                        size_mb = filesize / (1024 * 1024)
-                        size_str = f"{size_mb:.1f}MB"
-                    else:
-                        size_str = "Size N/A"
-                    
-                    if has_audio:
-                        audio_str = "with audio"
-                    elif ffmpeg_available:
-                        audio_str = "audio auto-merged"
-                    else:
-                        audio_str = "video only - no audio"
 
-                    display_text = f"{resolution}p  {ext}  {fps}fps  {size_str}  ({audio_str})"
+                    if has_audio:
+                        audio_str = "Included"
+                    elif self.ffmpeg_available:
+                        audio_str = "Merged automatically"
+                    else:
+                        audio_str = "None (FFmpeg missing)"
 
                     video_formats.append({
-                        'display': display_text,
-                        'format_id': format_id,
-                        'resolution': resolution,
+                        'format_id': f.get('format_id'),
+                        'resolution': f['height'],
                         'fps': fps,
                         'bitrate': f.get('tbr') or 0,
-                        'has_audio': has_audio
+                        'has_audio': has_audio,
+                        'values': (
+                            f"{f['height']}p",
+                            f"{fps:g}",
+                            f.get('ext', 'mp4').upper(),
+                            f"{filesize / (1024 * 1024):.1f} MB" if filesize else "—",
+                            audio_str,
+                        ),
                     })
 
             # Sort by resolution, then fps and bitrate, so the best version of each resolution is kept
             video_formats.sort(key=lambda x: (x['resolution'], x['fps'], x['bitrate']), reverse=True)
-            
+
             # Remove duplicates with same resolution and audio status
             seen = set()
             unique_formats = []
@@ -191,119 +267,148 @@ class YouTubeDownloader:
                 if key not in seen:
                     seen.add(key)
                     unique_formats.append(fmt)
-            
-            self.available_formats = unique_formats
-            
-            # Populate listbox
-            for fmt in unique_formats:
-                self.resolution_listbox.insert(tk.END, fmt['display'])
-            
-            self.progress.stop()
-            self.status_label.config(text=f"✓ Found {len(unique_formats)} formats. Select one to download.", fg="green")
-            self.download_btn.config(state="normal")
-            
+
+            self.on_ui(self.show_formats, info, unique_formats)
+
         except Exception as e:
-            self.progress.stop()
-            self.status_label.config(text="✗ Failed to fetch formats", fg="red")
-            messagebox.showerror("Error", f"Failed to fetch formats:\n{str(e)}")
-        finally:
-            self.fetch_btn.config(state="normal")
-    
+            self.on_ui(self.fetch_failed, str(e))
+
+    def show_formats(self, info, formats):
+        self.video_info = info
+        self.available_formats = formats
+
+        self.progress.stop()
+        self.progress.config(mode="determinate", value=0)
+
+        details = [info.get('title', 'Untitled')]
+        if info.get('uploader'):
+            details.append(info['uploader'])
+        if info.get('duration_string'):
+            details.append(info['duration_string'])
+        self.video_label.config(text="  ·  ".join(details))
+
+        for index, fmt in enumerate(formats):
+            self.format_table.insert("", "end", iid=str(index), values=fmt['values'])
+
+        self.set_busy(False)
+        if formats:
+            # Preselect the highest quality
+            self.format_table.selection_set("0")
+            self.format_table.focus("0")
+            self.set_status(f"Found {len(formats)} formats. Choose one and click Download.")
+        else:
+            self.set_status("No downloadable video formats found.", error=True)
+
+    def fetch_failed(self, error):
+        self.progress.stop()
+        self.progress.config(mode="determinate", value=0)
+        self.set_busy(False)
+        self.set_status("Couldn't fetch formats.", error=True)
+        messagebox.showerror("Couldn't Fetch Formats", error)
+
+    # ---------- downloading ----------
+
     def start_download(self):
-        selection = self.resolution_listbox.curselection()
-        if not selection:
-            messagebox.showerror("Error", "Please select a resolution from the list")
+        selection = self.format_table.selection()
+        if not selection or self.fetch_btn.instate(["disabled"]):
             return
-        
-        selected_index = selection[0]
-        selected_format = self.available_formats[selected_index]
-        
-        self.download_path = self.path_entry.get().strip()
-        if not os.path.exists(self.download_path):
-            messagebox.showerror("Error", "Download path does not exist")
+
+        selected_format = self.available_formats[int(selection[0])]
+
+        if not os.path.isdir(self.download_path):
+            messagebox.showerror("Folder Not Found", "The download folder doesn't exist.")
             return
-        
-        # Start download in separate thread
-        thread = threading.Thread(target=self.download_video, args=(selected_format,))
-        thread.start()
-    
+
+        if not selected_format['has_audio'] and not self.ffmpeg_available:
+            proceed = messagebox.askyesno(
+                "Download Without Audio?",
+                "FFmpeg isn't installed, so this video will be saved without sound.\n\n"
+                "Install FFmpeg to merge audio automatically, or choose a format "
+                "with audio included."
+            )
+            if not proceed:
+                return
+
+        self.set_busy(True)
+        self.reveal_btn.pack_forget()
+        self.progress.config(mode="determinate", value=0)
+        self.set_status("Starting download…")
+
+        threading.Thread(target=self.download_video, args=(selected_format,), daemon=True).start()
+
     def download_video(self, selected_format):
         try:
-            # Disable button and start progress bar
-            self.download_btn.config(state="disabled")
-            self.fetch_btn.config(state="disabled")
-            self.progress.start()
-            self.status_label.config(text="Downloading...", fg="blue")
-            
             format_id = selected_format['format_id']
-            
-            # Check if ffmpeg is available
-            ffmpeg_available = self.check_ffmpeg()
-            
-            # If format has no audio
-            if not selected_format['has_audio']:
-                if ffmpeg_available:
-                    # Merge with audio if ffmpeg is available
-                    format_string = f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio/best"
-                    merge_output = 'mp4'
-                else:
-                    # Download video-only without audio if ffmpeg not available
-                    response = messagebox.askyesno(
-                        "No Audio Warning",
-                        "FFmpeg is not installed. This video will be downloaded WITHOUT AUDIO.\n\n"
-                        "Do you want to continue?\n\n"
-                        "To get audio, either:\n"
-                        "• Install FFmpeg (see console for instructions)\n"
-                        "• Select a format that says 'with audio'"
-                    )
-                    if not response:
-                        self.progress.stop()
-                        self.status_label.config(text="Download cancelled", fg="gray")
-                        return
-                    format_string = format_id
-                    merge_output = None
+
+            if not selected_format['has_audio'] and self.ffmpeg_available:
+                # Download the best audio too and merge them into one mp4
+                format_string = f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio/best"
             else:
                 format_string = format_id
-                merge_output = None
-            
+
             ydl_opts = {
                 'format': format_string,
                 'outtmpl': os.path.join(self.download_path, '%(title)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'noprogress': True,
+                'progress_hooks': [self.on_progress],
+                'postprocessor_hooks': [self.on_postprocess],
             }
-            
-            if merge_output:
-                ydl_opts['merge_output_format'] = merge_output
-            
+
+            if not selected_format['has_audio'] and self.ffmpeg_available:
+                ydl_opts['merge_output_format'] = 'mp4'
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([self.video_info['webpage_url']])
-            
-            video_title = self.video_info.get('title', 'video')
-            
-            # Success
-            self.progress.stop()
-            audio_note = " (no audio)" if not selected_format['has_audio'] and not ffmpeg_available else ""
-            self.status_label.config(text=f"✓ Downloaded: {video_title}{audio_note}", fg="green")
-            messagebox.showinfo("Success", f"Video downloaded successfully!{audio_note}\n\nSaved to: {self.download_path}")
-            
+                info = ydl.extract_info(self.video_info['webpage_url'], download=True)
+
+            downloads = info.get('requested_downloads') or [{}]
+            filepath = downloads[0].get('filepath')
+            no_audio = not selected_format['has_audio'] and not self.ffmpeg_available
+
+            self.on_ui(self.download_finished, info.get('title', 'video'), filepath, no_audio)
+
         except Exception as e:
-            self.progress.stop()
-            self.status_label.config(text="✗ Download failed", fg="red")
-            messagebox.showerror("Error", f"Download failed:\n{str(e)}")
-        
-        finally:
-            # Re-enable buttons
-            self.download_btn.config(state="normal")
-            self.fetch_btn.config(state="normal")
-    
-    def check_ffmpeg(self):
-        """Check if ffmpeg is available"""
-        try:
-            import subprocess
-            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, 
-                          stderr=subprocess.PIPE, creationflags=0x08000000 if os.name == 'nt' else 0)
-            return True
-        except:
-            return False
+            self.on_ui(self.download_failed, str(e))
+
+    def on_progress(self, d):
+        # Called by yt-dlp on the worker thread
+        if d['status'] != 'downloading':
+            return
+
+        total = d.get('total_bytes') or d.get('total_bytes_estimate')
+        percent = d.get('downloaded_bytes', 0) / total * 100 if total else 0
+        part = "audio" if d.get('info_dict', {}).get('vcodec') == 'none' else "video"
+
+        text = f"Downloading {part}…  {percent:.0f}%"
+        if d.get('speed'):
+            text += f"  ·  {d['speed'] / (1024 * 1024):.1f} MB/s"
+
+        self.on_ui(self.update_progress, percent, text)
+
+    def on_postprocess(self, d):
+        if d['status'] == 'started' and d.get('postprocessor') == 'Merger':
+            self.on_ui(self.update_progress, 100, "Merging audio and video…")
+
+    def update_progress(self, percent, text):
+        self.progress.config(value=percent)
+        self.set_status(text)
+
+    def download_finished(self, title, filepath, no_audio):
+        self.progress.config(value=100)
+        self.set_busy(False)
+        self.last_file = filepath
+
+        note = " (no audio)" if no_audio else ""
+        self.set_status(f"✓ Saved “{title}”{note}")
+        if filepath:
+            self.reveal_btn.pack(side="right", padx=(0, 10))
+
+    def download_failed(self, error):
+        self.progress.config(value=0)
+        self.set_busy(False)
+        self.set_status("Download failed.", error=True)
+        messagebox.showerror("Download Failed", error)
 
 
 def main():

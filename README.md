@@ -7,10 +7,10 @@ A simple, user-friendly Python GUI application for downloading YouTube videos in
 ✅ **Resolution Selection** - View and choose from all available video qualities  
 ✅ **Quality Information** - See resolution, file size, FPS, and audio availability  
 ✅ **Automatic Audio Merging** - HD formats are downloaded with their audio and joined into one MP4  
-✅ **Easy-to-Use GUI** - Simple interface built with Tkinter  
+✅ **Native Look** - Clean Tkinter interface that uses the native macOS theme and follows dark mode  
+✅ **Live Progress** - Download percentage and speed, plus a "Show in Finder" button when done  
 ✅ **FFmpeg Auto-Detection** - Works with or without FFmpeg installed  
 ✅ **Custom Download Location** - Save videos wherever you want  
-✅ **Progress Tracking** - Visual feedback during downloads  
 
 ## Requirements
 
@@ -71,18 +71,17 @@ source .venv/bin/activate       # Windows: .venv\Scripts\activate
 python youtube_downloader.py
 ```
 
-2. Paste a YouTube URL
-3. Click "Fetch Resolutions"
-4. Select your preferred quality
-5. Click "Download Selected"
+2. Paste a YouTube URL and press Return (or click "Fetch")
+3. Select your preferred quality (the highest is preselected)
+4. Click "Download" (or double-click a row)
 
 ## How Audio Works
 
-YouTube stores HD video (roughly above 360p) and audio as separate streams. The format list shows:
+YouTube stores HD video (roughly above 360p) and audio as separate streams. The **Audio** column in the format table shows:
 
-- **with audio** - video and sound in one file, no FFmpeg needed
-- **audio auto-merged** - video-only stream; the app also downloads the best audio and joins them into one MP4 with FFmpeg
-- **video only - no audio** - shown when FFmpeg isn't installed; the download will have no sound
+- **Included** - video and sound in one file, no FFmpeg needed
+- **Merged automatically** - video-only stream; the app also downloads the best audio and joins them into one MP4 with FFmpeg
+- **None (FFmpeg missing)** - shown when FFmpeg isn't installed; the download will have no sound
 
 ## Troubleshooting
 
