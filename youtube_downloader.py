@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox, filedialog, font as tkfont
 import threading
 import subprocess
 import shutil
+import json
 import sys
 import os
 try:
@@ -12,6 +13,42 @@ except ImportError:
     exit()
 
 
+# Codecs QuickTime (and most players) can open inside an mp4
+PLAYABLE_VIDEO = {"h264", "hevc"}
+PLAYABLE_AUDIO = {"aac", "mp3", "alac"}
+
+# Higher is more widely playable; VP9 doesn't play in QuickTime at all
+CODEC_RANK = {"H.264": 3, "HEVC": 2, "AV1": 1}
+
+
+def codec_label(vcodec):
+    """Friendly name for a yt-dlp codec string like 'avc1.64002a' or 'vp09.00.41.08'."""
+    vcodec = (vcodec or "").lower()
+    if vcodec.startswith(("avc1", "h264")):
+        return "H.264"
+    if vcodec.startswith(("hev1", "hvc1", "h265")):
+        return "HEVC"
+    if vcodec.startswith("av01"):
+        return "AV1"
+    if vcodec.startswith(("vp09", "vp9")):
+        return "VP9"
+    return vcodec.split(".")[0].upper() or "Unknown"
+
+
+def audio_codec_label(acodec):
+    """Friendly name for a yt-dlp audio codec string like 'mp4a.40.2' or 'opus'."""
+    acodec = (acodec or "").lower()
+    if acodec.startswith("mp4a"):
+        return "AAC"
+    if acodec.startswith("opus"):
+        return "Opus"
+    return acodec.split(".")[0].upper() or "Unknown"
+
+
+def size_label(filesize):
+    return f"{filesize / (1024 * 1024):.1f} MB" if filesize else "—"
+
+
 class YouTubeDownloader:
     def __init__(self, root):
         self.root = root
@@ -19,8 +56,11 @@ class YouTubeDownloader:
 
         # Download directory and formats storage
         self.download_path = os.path.join(os.path.expanduser("~"), "Downloads")
-        self.available_formats = []
+        self.available_formats = []   # formats currently shown in the table
+        self.video_formats = []
+        self.audio_formats = []
         self.video_info = None
+        self.save_as = tk.StringVar(value="mp4")
         self.last_file = None
         self.ffmpeg_available = shutil.which("ffmpeg") is not None
 
@@ -89,18 +129,29 @@ class YouTubeDownloader:
         self.video_label = ttk.Label(container, text="", style="Secondary.TLabel")
         self.video_label.pack(anchor="w", pady=(8, 0))
 
-        # Formats table
-        ttk.Label(container, text="Quality", style="Section.TLabel").pack(anchor="w", pady=(14, 6))
+        # Formats table, with the Save as choice on the same row
+        quality_row = ttk.Frame(container)
+        quality_row.pack(fill="x", pady=(14, 6))
+        ttk.Label(quality_row, text="Quality", style="Section.TLabel").pack(side="left")
+
+        save_as_options = [("Video (MP4)", "mp4"), ("Audio (M4A)", "m4a"), ("Audio (MP3)", "mp3")]
+        for text, value in reversed(save_as_options):
+            option = ttk.Radiobutton(quality_row, text=text, value=value, variable=self.save_as,
+                                     command=self.populate_table)
+            option.pack(side="right", padx=(12, 0))
+            if value == "mp3" and not self.ffmpeg_available:
+                option.state(["disabled"])   # MP3 needs FFmpeg to convert
+        ttk.Label(quality_row, text="Save as:", style="Secondary.TLabel").pack(side="right")
 
         # Packed last (see end of build_ui) so it only takes space left over by the other sections
         table_frame = ttk.Frame(container)
 
         columns = {
-            "resolution": ("Resolution", 110),
-            "fps": ("FPS", 60),
-            "format": ("Format", 80),
+            "resolution": ("Resolution", 100),
+            "fps": ("FPS", 95),
+            "format": ("Codec", 130),
             "size": ("Size", 100),
-            "audio": ("Audio", 180),
+            "audio": ("Audio", 170),
         }
         self.format_table = ttk.Treeview(table_frame, columns=list(columns),
                                          show="headings", selectmode="browse", height=6)
@@ -241,23 +292,33 @@ class YouTubeDownloader:
                     else:
                         audio_str = "None (FFmpeg missing)"
 
+                    # Codecs QuickTime can't play get converted to H.264 after downloading
+                    codec = codec_label(f.get('vcodec'))
+                    if codec in ("H.264", "HEVC") or not self.ffmpeg_available:
+                        codec_str = codec
+                    else:
+                        codec_str = f"{codec} → H.264"
+
                     video_formats.append({
                         'format_id': f.get('format_id'),
                         'resolution': f['height'],
                         'fps': fps,
+                        'codec_rank': CODEC_RANK.get(codec, 0),
                         'bitrate': f.get('tbr') or 0,
                         'has_audio': has_audio,
                         'values': (
                             f"{f['height']}p",
                             f"{fps:g}",
-                            f.get('ext', 'mp4').upper(),
-                            f"{filesize / (1024 * 1024):.1f} MB" if filesize else "—",
+                            codec_str,
+                            size_label(filesize),
                             audio_str,
                         ),
                     })
 
-            # Sort by resolution, then fps and bitrate, so the best version of each resolution is kept
-            video_formats.sort(key=lambda x: (x['resolution'], x['fps'], x['bitrate']), reverse=True)
+            # Sort by resolution, fps, then the most playable codec and bitrate,
+            # so each resolution keeps its best version (preferring H.264 over VP9/AV1)
+            video_formats.sort(key=lambda x: (x['resolution'], x['fps'], x['codec_rank'], x['bitrate']),
+                               reverse=True)
 
             # Remove duplicates with same resolution and audio status
             seen = set()
@@ -268,14 +329,41 @@ class YouTubeDownloader:
                     seen.add(key)
                     unique_formats.append(fmt)
 
-            self.on_ui(self.show_formats, info, unique_formats)
+            # Audio-only formats, for saving as M4A or MP3
+            audio_formats = []
+            for f in info.get('formats', []):
+                if f.get('vcodec') == 'none' and f.get('acodec') not in (None, 'none'):
+                    format_id = f.get('format_id', '')
+                    audio_formats.append({
+                        'format_id': format_id,
+                        'codec': audio_codec_label(f.get('acodec')),
+                        'bitrate': f.get('abr') or f.get('tbr') or 0,
+                        'sample_rate': f.get('asr') or 0,
+                        'size': size_label(f.get('filesize') or f.get('filesize_approx')),
+                        # Prefer the original language and skip volume-normalized (DRC) copies
+                        'preference': (f.get('language_preference') or 0, 'drc' not in format_id),
+                    })
+
+            # Keep one entry per codec and bitrate level, highest bitrate first
+            audio_formats.sort(key=lambda x: (x['preference'], x['bitrate']), reverse=True)
+            seen = set()
+            unique_audio = []
+            for fmt in audio_formats:
+                key = (fmt['codec'], round(fmt['bitrate'], -1))
+                if key not in seen:
+                    seen.add(key)
+                    unique_audio.append(fmt)
+            unique_audio.sort(key=lambda x: x['bitrate'], reverse=True)
+
+            self.on_ui(self.show_formats, info, unique_formats, unique_audio)
 
         except Exception as e:
             self.on_ui(self.fetch_failed, str(e))
 
-    def show_formats(self, info, formats):
+    def show_formats(self, info, video_formats, audio_formats):
         self.video_info = info
-        self.available_formats = formats
+        self.video_formats = video_formats
+        self.audio_formats = audio_formats
 
         self.progress.stop()
         self.progress.config(mode="determinate", value=0)
@@ -287,17 +375,60 @@ class YouTubeDownloader:
             details.append(info['duration_string'])
         self.video_label.config(text="  ·  ".join(details))
 
-        for index, fmt in enumerate(formats):
-            self.format_table.insert("", "end", iid=str(index), values=fmt['values'])
-
         self.set_busy(False)
-        if formats:
-            # Preselect the highest quality
-            self.format_table.selection_set("0")
-            self.format_table.focus("0")
-            self.set_status(f"Found {len(formats)} formats. Choose one and click Download.")
+        self.populate_table()
+        if video_formats or audio_formats:
+            self.set_status("Choose a format and click Download.")
         else:
-            self.set_status("No downloadable video formats found.", error=True)
+            self.set_status("No downloadable formats found.", error=True)
+
+    def populate_table(self):
+        """Fill the table with video or audio formats, depending on the Save as choice."""
+        mode = self.save_as.get()
+        table = self.format_table
+        table.delete(*table.get_children())
+
+        if mode == "mp4":
+            headings = ("Resolution", "FPS", "Codec", "Size", "Audio")
+            formats = self.video_formats
+            rows = [fmt['values'] for fmt in formats]
+        else:
+            headings = ("Bitrate", "Sample Rate", "Codec", "Size", "Output")
+            # Without FFmpeg only AAC can be saved (as M4A, no conversion needed)
+            formats = [f for f in self.audio_formats if self.ffmpeg_available or f['codec'] == "AAC"]
+            if mode == "m4a":
+                # AAC goes into M4A without re-encoding, so list it first
+                formats = sorted(formats, key=lambda f: (f['codec'] == "AAC", f['bitrate']), reverse=True)
+
+            rows = []
+            for fmt in formats:
+                if mode == "m4a" and fmt['codec'] == "AAC":
+                    output = "M4A, no conversion"
+                else:
+                    output = f"Converted to {mode.upper()}"
+                rows.append((
+                    f"{fmt['bitrate']:.0f} kbps" if fmt['bitrate'] else "—",
+                    f"{fmt['sample_rate'] / 1000:g} kHz" if fmt['sample_rate'] else "—",
+                    fmt['codec'],
+                    fmt['size'],
+                    output,
+                ))
+
+        for col, heading in zip(table["columns"], headings):
+            table.heading(col, text=heading)
+
+        self.available_formats = formats
+        for index, values in enumerate(rows):
+            table.insert("", "end", iid=str(index), values=values)
+
+        if formats:
+            # Preselect the best option
+            table.selection_set("0")
+            table.focus("0")
+        if formats and not self.fetch_btn.instate(["disabled"]):
+            self.download_btn.state(["!disabled"])
+        else:
+            self.download_btn.state(["disabled"])
 
     def fetch_failed(self, error):
         self.progress.stop()
@@ -313,13 +444,14 @@ class YouTubeDownloader:
         if not selection or self.fetch_btn.instate(["disabled"]):
             return
 
+        mode = self.save_as.get()
         selected_format = self.available_formats[int(selection[0])]
 
         if not os.path.isdir(self.download_path):
             messagebox.showerror("Folder Not Found", "The download folder doesn't exist.")
             return
 
-        if not selected_format['has_audio'] and not self.ffmpeg_available:
+        if mode == "mp4" and not selected_format['has_audio'] and not self.ffmpeg_available:
             proceed = messagebox.askyesno(
                 "Download Without Audio?",
                 "FFmpeg isn't installed, so this video will be saved without sound.\n\n"
@@ -334,20 +466,14 @@ class YouTubeDownloader:
         self.progress.config(mode="determinate", value=0)
         self.set_status("Starting download…")
 
-        threading.Thread(target=self.download_video, args=(selected_format,), daemon=True).start()
+        threading.Thread(target=self.download_video, args=(selected_format, mode), daemon=True).start()
 
-    def download_video(self, selected_format):
+    def download_video(self, selected_format, mode):
         try:
             format_id = selected_format['format_id']
 
-            if not selected_format['has_audio'] and self.ffmpeg_available:
-                # Download the best audio too and merge them into one mp4
-                format_string = f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio/best"
-            else:
-                format_string = format_id
-
             ydl_opts = {
-                'format': format_string,
+                'format': format_id,
                 'outtmpl': os.path.join(self.download_path, '%(title)s.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
@@ -356,20 +482,86 @@ class YouTubeDownloader:
                 'postprocessor_hooks': [self.on_postprocess],
             }
 
-            if not selected_format['has_audio'] and self.ffmpeg_available:
-                ydl_opts['merge_output_format'] = 'mp4'
+            if mode == "mp4":
+                if not selected_format['has_audio'] and self.ffmpeg_available:
+                    # Download the best audio too and merge them into one mp4
+                    ydl_opts['format'] = f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio/best"
+                    ydl_opts['merge_output_format'] = 'mp4'
+            elif self.ffmpeg_available:
+                # Save as M4A (AAC) or MP3; AAC sources are copied into M4A without re-encoding.
+                # MP3 uses the best variable bitrate setting.
+                ydl_opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': mode,
+                    'preferredquality': '0' if mode == "mp3" else '192',
+                }]
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(self.video_info['webpage_url'], download=True)
 
             downloads = info.get('requested_downloads') or [{}]
             filepath = downloads[0].get('filepath')
-            no_audio = not selected_format['has_audio'] and not self.ffmpeg_available
+            if mode == "mp4" and filepath and self.ffmpeg_available:
+                filepath = self.make_playable(filepath, info.get('duration'))
+            no_audio = mode == "mp4" and not selected_format['has_audio'] and not self.ffmpeg_available
 
             self.on_ui(self.download_finished, info.get('title', 'video'), filepath, no_audio)
 
         except Exception as e:
             self.on_ui(self.download_failed, str(e))
+
+    def make_playable(self, filepath, duration):
+        """Re-encode to H.264/AAC mp4 if QuickTime can't play the downloaded codecs.
+        Runs on the worker thread and returns the final file path."""
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+             "-of", "json", filepath],
+            capture_output=True, text=True
+        )
+        streams = json.loads(probe.stdout or "{}").get("streams", [])
+        convert_video = any(s["codec_name"] not in PLAYABLE_VIDEO
+                            for s in streams if s.get("codec_type") == "video")
+        convert_audio = any(s["codec_name"] not in PLAYABLE_AUDIO
+                            for s in streams if s.get("codec_type") == "audio")
+        if not (convert_video or convert_audio):
+            return filepath
+
+        self.on_ui(self.update_progress, 0, "Converting to H.264 for QuickTime…")
+
+        base = os.path.splitext(filepath)[0]
+        temp_path = base + ".converting.mp4"
+        video_args = (["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+                      if convert_video else ["-c:v", "copy"])
+        audio_args = ["-c:a", "aac", "-b:a", "192k"] if convert_audio else ["-c:a", "copy"]
+
+        process = subprocess.Popen(
+            ["ffmpeg", "-y", "-v", "error", "-i", filepath, *video_args, *audio_args,
+             "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", temp_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+
+        # ffmpeg reports how far it has encoded as out_time_us=<microseconds>
+        for line in process.stdout:
+            if line.startswith("out_time_us=") and duration:
+                try:
+                    seconds = int(line.split("=")[1]) / 1_000_000
+                except ValueError:
+                    continue
+                percent = max(0, min(seconds / duration * 100, 100))
+                self.on_ui(self.update_progress, percent,
+                           f"Converting to H.264 for QuickTime…  {percent:.0f}%")
+
+        errors = process.stderr.read()
+        if process.wait() != 0:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise RuntimeError(f"Converting the video failed:\n{errors.strip()}")
+
+        final_path = base + ".mp4"
+        os.replace(temp_path, final_path)
+        if final_path != filepath:
+            os.remove(filepath)
+        return final_path
 
     def on_progress(self, d):
         # Called by yt-dlp on the worker thread
@@ -387,8 +579,12 @@ class YouTubeDownloader:
         self.on_ui(self.update_progress, percent, text)
 
     def on_postprocess(self, d):
-        if d['status'] == 'started' and d.get('postprocessor') == 'Merger':
+        if d['status'] != 'started':
+            return
+        if d.get('postprocessor') == 'Merger':
             self.on_ui(self.update_progress, 100, "Merging audio and video…")
+        elif d.get('postprocessor') == 'ExtractAudio':
+            self.on_ui(self.update_progress, 100, "Converting audio…")
 
     def update_progress(self, percent, text):
         self.progress.config(value=percent)
